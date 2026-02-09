@@ -205,7 +205,7 @@ These are typically redirected by the runner into files for debugging or auditin
 2. **Instances must be present during every flush**
 3. **CrowdStrike AID is the sole join key between assets and vulnerabilities**
 
-Breaking any of these invariants will result in partial ingestion or dropped findings.
+
 
 ---
 
@@ -218,4 +218,4 @@ This integration provides:
 - Explicit NDJSON audit trails
 - Clean separation between collection, mapping, and flushing
 
-It is suitable for **production deployments** in Zafran environments with large or complex CrowdStrike tenants.
+
