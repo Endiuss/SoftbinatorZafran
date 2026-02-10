@@ -4,8 +4,7 @@ load("log", "log")
 load("zafran", "zafran")
 
 # ==============================================================================
-# CrowdStrike → Zafran integration (Path A + LEGACY vuln NDJSON export format)
-#
+# CrowdStrike → Zafran integration
 # Output tokens (consumed by start_crowdstrike.sh awk):
 #   EXPORT_DEVICE_JSON <json>
 #   EXPORT_VULN_JSON   <json>   # LEGACY format (cve/first_seen/last_seen/package/score/...)
