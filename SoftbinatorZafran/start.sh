@@ -27,8 +27,8 @@ set -euo pipefail
 # REQUIRED (set these via env or flags)
 # -----------------------
 API_URL="${API_URL:-https://api.us-2.crowdstrike.com}"
-API_KEY="${API_KEY:-1f23eafd83114c8f85bd53ce0e1323cd}"
-API_SECRET="${API_SECRET:-QHtdI9mOi1hb7l5jkEvy3xGVXNsTR4Sf806z2peM}"
+API_KEY="${API_KEY:-}"
+API_SECRET="${API_SECRET:-}"
 
 # -----------------------
 # OPTIONAL knobs (empty by default)
