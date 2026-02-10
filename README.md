@@ -1,221 +1,168 @@
-# CrowdStrike → Zafran Integration
+## CrowdStrike → Zafran Custom Integration
 
-This project implements a **Starlark-based integration** that pulls **assets (devices)** and **Spotlight vulnerabilities** from CrowdStrike and ingests them into **Zafran** using Zafran’s public custom integrations framework.
+This repository provides a production‑grade **CrowdStrike Falcon Spotlight integration** for **Zafran**, implemented in **Starlark** and designed for correctness, safety, and reproducibility.
 
+The integration collects:
+- **Assets / devices** from CrowdStrike Falcon
+- **Vulnerabilities & misconfigurations** from Falcon Spotlight
 
----
-
-## Overview
-
-The integration performs the following high-level steps:
-
-1. Authenticate to CrowdStrike using **OAuth2 client credentials**
-2. Fetch all devices (hosts) and map them to **Zafran InstanceData**
-3. Stream Spotlight vulnerabilities and map them to **Zafran Vulnerability**
-4. Periodically flush collected data safely
-5. Emit NDJSON export lines for auditing and debugging
+while enforcing **strict device‑scoped vulnerability collection** and offering **full user control via FQL filters**.
 
 ---
 
-## Supported CrowdStrike APIs
+## Key Features
 
-- OAuth2
-  - `/oauth2/token`
-- Devices (Assets)
-  - `/devices/queries/devices-scroll/v1`
-  - `/devices/entities/devices/v2`
-- Spotlight Vulnerabilities
-  - `/spotlight/combined/vulnerabilities/v1`
+### 1. Device‑scoped vulnerability collection 
 
----
+1. Devices are collected first using the provided device filter
+2. Device IDs (AIDs) are extracted
+3. Spotlight queries are constrained to those AIDs
 
-## Requirements
-
-- Zafran runner with:
-  - Starlark support
-  - `http`, `json`, `log`, `zafran` modules
-- CrowdStrike API credentials:
-  - `client_id`
-  - `client_secret`
-- API permissions:
-  - Devices (read)
-  - Spotlight Vulnerabilities (read)
+This guarantees:
+- No tenant‑wide leakage
+- Every vulnerability maps to a collected device
+- Strong referential integrity between devices and vulnerabilities
 
 ---
 
-## Configuration Parameters
+### 2. User‑controlled FQL filtering (no URL encoding)
+Users can pass **raw CrowdStrike FQL** directly from the CLI:
 
-The integration is configured via keyword arguments passed to `main(**kwargs)`.
+- Device filters (`--device-filter`, `--device-sort`)
+- Vulnerability filters (`--vuln-filter`, `--vuln-sort`, `--vuln-facets`)
 
-### Required parameters
-
-| Parameter | Description |
-|---------|-------------|
-| `api_url` | CrowdStrike API base URL (e.g. `https://api.us-2.crowdstrike.com`) |
-| `api_key` | CrowdStrike OAuth2 `client_id` |
-| `api_secret` | CrowdStrike OAuth2 `client_secret` |
-
-### Optional parameters
-
-| Parameter | Default | Description |
-|---------|---------|-------------|
-| `vuln_filter` | `updated_timestamp:>'1970-01-01'` | FQL filter used when querying Spotlight vulnerabilities |
+No URL encoding (`%3A`, `%27`, etc.) is required.
+A wrapper script safely escapes parameters before passing them to the runner.
 
 ---
 
-## Execution Flow
+### 3. Legacy vulnerability NDJSON output (backward compatible)
+Vulnerabilities are exported in the **legacy NDJSON format**:
 
-### 1. Authentication
-
-- Performs OAuth2 **client-credentials** authentication.
-- Retrieves a bearer token used for all subsequent API calls.
-- Execution stops immediately if authentication fails.
-
----
-
-### 2. Device (Asset) Collection
-
-#### 2.1 Enumerate device IDs
-- Uses `devices-scroll/v1` to retrieve **all device AIDs** via cursor-based pagination.
-
-#### 2.2 Fetch device details
-- Device AIDs are fetched in bulk using `devices/entities/devices/v2`.
-- Requests are chunked to avoid payload limits.
-
-#### 2.3 Instance mapping
-Each CrowdStrike device is mapped to a **Zafran InstanceData** object with:
-
-- `instance_id` → CrowdStrike AID
-- `name` → hostname (fallback to AID)
-- `operating_system`
-- IP addresses
-- Identifiers (`CROWDSTRIKE_AID`)
-- OS labels (Windows / Linux heuristic)
-- Instance type: `MACHINE`
-
-#### 2.4 Collection and export
-- Instances are collected via `zafran.collect_instance()`
-- Device metadata is exported as NDJSON lines:
-  ```
-  EXPORT_DEVICE_JSON {...}
-  ```
-
-All instance protos are stored locally to support safe flush operations later.
-
----
-
-### 3. Vulnerability Collection (Spotlight)
-
-#### 3.1 Streaming vulnerabilities
-- Uses `spotlight/combined/vulnerabilities/v1`
-- Pagination via `after` cursor
-- Requests include facets:
-  - `cve`
-  - `host_info`
-  - `remediation`
-
-#### 3.2 Host matching
-Each vulnerability is associated to a host via:
-
-1. `raw["aid"]`
-2. Fallback: `raw["host_info"]["aid"]`
-
-Vulnerabilities are classified as:
-- **Mapped**: host AID exists in collected instances
-- **Unmapped**: missing AID or host not found in instance inventory
-
-#### 3.3 Vulnerability mapping
-Mapped vulnerabilities are converted into **Zafran Vulnerability** objects with:
-
-- CVE identifier
-- Severity and CVSS score (best-effort)
-- Component (application/vendor/version)
-- Remediation suggestion (if available)
-- Runtime flag (`in_runtime = true`)
-
-Mapped vulnerabilities are collected via `zafran.collect_vulnerability()` and exported as:
-
-```
-EXPORT_VULN_JSON {...}
+```json
+{
+  "cve": "CVE-2024-21853",
+  "first_seen": "2025-11-21T14:02:54Z",
+  "hostname": "example-host",
+  "instance_id": "<aid>",
+  "last_seen": "2025-11-23T03:01:53Z",
+  "package": {
+    "name": "openssl 3.0.2",
+    "version": "3.0.2"
+  },
+  "score": 7.5,
+  "severity": "HIGH",
+  "status": "open"
+}
 ```
 
-Unmapped vulnerabilities are exported as:
+Proto collection is still performed internally for Zafran ingestion; only the
+export format is legacy.
 
-```
-UNMAPPED_VULN_JSON {...}
+---
+
+### 4. Robust pagination & flushing
+- Supports large tenants via paginated API calls
+- Periodic flushing with instance re‑collection to preserve context
+- Safe handling of unmapped / malformed Spotlight findings
+
+---
+
+## Repository Structure
+
+```text
+.
+├── start.sh                  # User‑facing CLI wrapper
+├── start_crowdstrike.sh      # Runner invocation + NDJSON extraction
+├── dev/
+│   └── crowdstrike.star      # Main Starlark integration
+├── output/                   # Generated NDJSON + logs
+├── test_runs_time_*          # Automated time‑filter test results
+└── run_time_tests.sh         # Time‑filter regression tests
 ```
 
 ---
 
-### 4. Safe Flush Strategy (Critical)
+## Authentication (OAuth2)
 
-Zafran drops vulnerabilities if a flush occurs while instances are missing from the buffer.
+CrowdStrike APIs use **OAuth2 Client Credentials**. The integration authenticates by calling:
 
-To prevent this, the integration enforces the following invariant:
+- `POST /oauth2/token`
+- form body: `client_id=<API_KEY>&client_secret=<API_SECRET>`
+- response: `access_token`
 
-> **Every flush is preceded by re-collecting all instances.**
+The script then adds the header to all subsequent API calls:
 
-#### Flush behavior
-- Every `FLUSH_EVERY` vulnerabilities:
-  1. Re-collect all instances into the buffer
-  2. Call `zafran.flush()`
-- After vulnerability streaming completes:
-  1. Re-collect all instances
-  2. Final `zafran.flush()`
+- `Authorization: Bearer <access_token>`
 
-This guarantees **zero orphan vulnerability loss**, even on large tenants.
+### Required credentials
 
----
+You must provide a **CrowdStrike API client** (client_id / client_secret) with permissions for:
+- Device inventory (Falcon Discover / Hosts)
+- Spotlight vulnerabilities
 
-## NDJSON Output
-
-The script prints tagged NDJSON lines to stdout:
-
-| Prefix | Description |
-|------|-------------|
-| `EXPORT_DEVICE_JSON` | Normalized device metadata |
-| `EXPORT_VULN_JSON` | Normalized mapped vulnerability |
-| `UNMAPPED_VULN_JSON` | Vulnerability missing host association |
-
-These are typically redirected by the runner into files for debugging or auditing.
+(Exact permission names vary by tenant; ensure the client can call the endpoints used below.)
 
 ---
 
-## Error Handling
+## Usage
 
-- HTTP errors are logged with truncated response bodies
-- Authentication failures abort execution
-- Pagination failures stop the affected phase
-- Mapping failures do not stop the run; they emit `UNMAPPED_VULN_JSON`
+### Environment variables
+
+```bash
+export API_URL="https://api.us-2.crowdstrike.com"
+export API_KEY="<client_id>"
+export API_SECRET="<client_secret>"
+```
+
+### Minimal run
+
+```bash
+./start.sh \
+  --device-filter "platform_name:'Windows'" \
+  --vuln-filter "updated_timestamp:>'now-7d'"
+```
+
+### Full example
+
+```bash
+./start.sh \
+  --device-filter "platform_name:'Windows'" \
+  --device-sort "hostname.asc" \
+  --devices-limit 5000 \
+  --vuln-filter "updated_timestamp:>'now-7d'" \
+  --vuln-sort "updated_timestamp.desc" \
+  --vuln-facets "cve,host_info,remediation" \
+  --vulns-limit 200 \
+  --flush-every 200
+```
 
 ---
 
-## Scalability Characteristics
+## Automated time‑filter tests
 
-- Supports tens of thousands of devices and vulnerabilities
-- Chunked POST requests to avoid payload limits
-- Streaming vulnerability ingestion with periodic flushes
-- Memory footprint bounded by instance inventory size
+A regression test runner validates time‑based filtering semantics:
+
+```bash
+./run_time_tests.sh
+```
+
+Tests include:
+- Monotonic windows (`now-1d ⊆ now-7d ⊆ now-30d`)
+- Bounded ranges (`now-7d` to `now-1d`)
+- Future windows (must return zero results)
+- `created_timestamp` vs `updated_timestamp` behavior
+
+Each test run is written to its own folder with PASS/FAIL summaries.
 
 ---
 
-## Key Design Invariants
+## Guarantees
 
-1. **OAuth token must cover both Devices and Spotlight scopes**
-2. **Instances must be present during every flush**
-3. **CrowdStrike AID is the sole join key between assets and vulnerabilities**
-
-
+- No vulnerability is emitted without a matching device
+- Filters are passed verbatim to CrowdStrike (no silent widening)
+- Sorting and pagination are applied server‑side
+- Output format remains stable for existing consumers
 
 ---
-
-## Summary
-
-This integration provides:
-
-- Correct, loss-free ingestion of CrowdStrike assets and vulnerabilities
-- Stable behavior on large datasets
-- Explicit NDJSON audit trails
-- Clean separation between collection, mapping, and flushing
-
 
